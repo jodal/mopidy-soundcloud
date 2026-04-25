@@ -15,7 +15,7 @@ classifiers = [
 dynamic = ["version"]
 dependencies = [
     "beautifulsoup4 >= 4.13.4",
-    "mopidy >= 4.0.0a7",
+    "mopidy >= 4.0.0",
     "pykka >= 4.1",
     "requests >= 2.32",
 ]
