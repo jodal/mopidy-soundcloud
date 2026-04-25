@@ -4,23 +4,26 @@ import collections
 import logging
 import re
 import urllib.parse
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, override
 
-from mopidy import backend, models
-from mopidy.models import SearchResult, Track
+from mopidy import backend
+from mopidy.models import Ref, SearchResult, Track
+from mopidy.types import SearchQuery, Uri
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from mopidy_soundcloud.actor import SoundCloudBackend
 
 logger = logging.getLogger(__name__)
 
 
-def generate_uri(path):
-    return f"soundcloud:directory:{urllib.parse.quote('/'.join(path))}"
+def generate_uri(path) -> Uri:
+    return Uri(f"soundcloud:directory:{urllib.parse.quote('/'.join(path))}")
 
 
 def new_folder(name, path):
-    return models.Ref.directory(uri=generate_uri(path), name=name)
+    return Ref.directory(uri=generate_uri(path), name=name)
 
 
 def simplify_search_query(query):
@@ -40,20 +43,23 @@ def simplify_search_query(query):
 class SoundCloudLibraryProvider(backend.LibraryProvider):
     backend: SoundCloudBackend
 
-    root_directory = models.Ref.directory(uri="soundcloud:directory", name="SoundCloud")
+    root_directory = Ref.directory(
+        uri=Uri("soundcloud:directory"),
+        name="SoundCloud",
+    )
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.vfs = {"soundcloud:directory": {}}
-        self.add_to_vfs(new_folder("Following", ["following"]))
-        self.add_to_vfs(new_folder("Liked", ["liked"]))
-        self.add_to_vfs(new_folder("Sets", ["sets"]))
-        self.add_to_vfs(new_folder("Stream", ["stream"]))
+        self._add_to_vfs(new_folder("Following", ["following"]))
+        self._add_to_vfs(new_folder("Liked", ["liked"]))
+        self._add_to_vfs(new_folder("Sets", ["sets"]))
+        self._add_to_vfs(new_folder("Stream", ["stream"]))
 
-    def add_to_vfs(self, _model):
+    def _add_to_vfs(self, _model):
         self.vfs["soundcloud:directory"][_model.uri] = _model
 
-    def list_sets(self):
+    def _list_sets(self):
         sets_vfs = collections.OrderedDict()
         for name, set_id, _tracks in self.backend.remote.get_sets():
             sets_list = new_folder(name, ["sets", set_id])
@@ -61,14 +67,14 @@ class SoundCloudLibraryProvider(backend.LibraryProvider):
             sets_vfs[set_id] = sets_list
         return list(sets_vfs.values())
 
-    def list_liked(self):
+    def _list_liked(self):
         vfs_list = collections.OrderedDict()
         for track in self.backend.remote.get_likes():
             logger.debug(f"Adding liked track {track.name} to VFS")
-            vfs_list[track.name] = models.Ref.track(uri=track.uri, name=track.name)
+            vfs_list[track.name] = Ref.track(uri=track.uri, name=track.name)
         return list(vfs_list.values())
 
-    def list_user_follows(self):
+    def _list_user_follows(self):
         sets_vfs = collections.OrderedDict()
         for name, user_id in self.backend.remote.get_followings():
             sets_list = new_folder(name, ["following", user_id])
@@ -76,67 +82,80 @@ class SoundCloudLibraryProvider(backend.LibraryProvider):
             sets_vfs[user_id] = sets_list
         return list(sets_vfs.values())
 
-    def tracklist_to_vfs(self, track_list):
+    def _tracklist_to_vfs(self, track_list):
         vfs_list = collections.OrderedDict()
         for temp_track in track_list:
             if not isinstance(temp_track, Track):
                 temp_track = self.backend.remote.parse_track(temp_track)  # noqa: PLW2901
-            if hasattr(temp_track, "uri"):
-                vfs_list[temp_track.name] = models.Ref.track(
+            if temp_track is not None:
+                vfs_list[temp_track.name] = Ref.track(
                     uri=temp_track.uri, name=temp_track.name
                 )
         return list(vfs_list.values())
 
-    def browse(self, uri):  # noqa: PLR0911
+    @override
+    def browse(self, uri: Uri) -> list[Ref]:  # noqa: PLR0911
         if not self.vfs.get(uri):
-            (req_type, res_id) = re.match(r".*:(\w*)(?:/(\d*))?", uri).groups()
+            match = re.match(r".*:(\w*)(?:/(\d*))?", uri)
+            if match is None:
+                return []
+            (req_type, res_id) = match.groups()
             # Sets
             if req_type == "sets":
                 if res_id:
-                    return self.tracklist_to_vfs(self.backend.remote.get_set(res_id))
-                return self.list_sets()
+                    return self._tracklist_to_vfs(self.backend.remote.get_set(res_id))
+                return self._list_sets()
             # Following
             if req_type == "following":
                 if res_id:
-                    return self.tracklist_to_vfs(self.backend.remote.get_tracks(res_id))
-                return self.list_user_follows()
+                    return self._tracklist_to_vfs(
+                        self.backend.remote.get_tracks(res_id)
+                    )
+                return self._list_user_follows()
             # Liked
             if req_type == "liked":
-                return self.list_liked()
+                return self._list_liked()
             # User stream
             if req_type == "stream":
-                return self.tracklist_to_vfs(self.backend.remote.get_user_stream())
+                return self._tracklist_to_vfs(self.backend.remote.get_user_stream())
 
         # root directory
         return list(self.vfs.get(uri, {}).values())
 
-    def search(self, query=None, uris=None, exact=False):  # noqa: ARG002, FBT002
+    @override
+    def search(
+        self,
+        query: SearchQuery,
+        uris: Iterable[Uri] | None = None,
+        exact: bool = False,
+    ) -> SearchResult | None:
         # TODO: Support exact search
 
         if not query:
             return None
 
         if "uri" in query:
-            search_query = "".join(query["uri"])
+            search_query = "".join(str(query["uri"]))
             url = urllib.parse.urlparse(search_query)
             if "soundcloud.com" not in url.netloc:
                 return None
             logger.info(f"Resolving SoundCloud for: {search_query}")
             return SearchResult(
-                uri="soundcloud:search",
+                uri=Uri("soundcloud:search"),
                 tracks=self.backend.remote.resolve_url(search_query),
             )
         search_query = simplify_search_query(query)
         logger.info(f"Searching SoundCloud for: {search_query}")
         return SearchResult(
-            uri="soundcloud:search",
+            uri=Uri("soundcloud:search"),
             tracks=self.backend.remote.search(search_query),
         )
 
-    def lookup(self, uri):
-        if "sc:" in uri:
-            uri = uri.replace("sc:", "")
-            return self.backend.remote.resolve_url(uri)
+    @override
+    def lookup(self, uri: Uri) -> list[Track]:
+        if uri.startswith("sc:"):
+            uri = Uri(uri.removeprefix("sc:"))
+            return list(self.backend.remote.resolve_url(uri))
 
         try:
             track_id = self.backend.remote.parse_track_uri(uri)

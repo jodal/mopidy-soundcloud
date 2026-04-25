@@ -1,13 +1,16 @@
+from __future__ import annotations
+
 import datetime
 import logging
 import re
 import string
 import time
 import unicodedata
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from contextlib import closing
 from http import HTTPStatus
 from multiprocessing.pool import ThreadPool
+from typing import Any
 from urllib.parse import quote_plus
 
 import requests
@@ -41,7 +44,7 @@ def get_requests_session(proxy_config, user_agent, token, public=False):  # noqa
     full_user_agent = httpclient.format_user_agent(user_agent)
 
     session = requests.Session()
-    session.proxies.update({"http": proxy, "https": proxy})
+    session.proxies.update({"http": proxy, "https": proxy})  # pyright: ignore[reportCallIssue, reportArgumentType]
     if not public:
         session.headers.update({"user-agent": full_user_agent})
         session.headers.update({"Authorization": f"OAuth {token}"})
@@ -61,20 +64,24 @@ def get_mopidy_requests_session(config, public=False):  # noqa: FBT002
 
 
 class cache:  # noqa: N801
-    # TODO: merge this to util library
-
-    def __init__(self, ctl=8, ttl=3600):
-        self.cache = {}
+    def __init__(
+        self,
+        ctl: int = 8,
+        ttl: int = 3600,
+    ) -> None:
+        self.cache: dict[tuple[Any, ...], tuple[Any, float]] = {}
         self.ctl = ctl
         self.ttl = ttl
         self._call_count = 1
+        self.func: Callable[..., Any] | None = None
 
-    def __call__(self, func):
-        def _memoized(*args):
+    def __call__[**P, R](self, func: Callable[P, R]) -> Callable[P, R]:
+        def _memoized(*args: P.args, **kwargs: P.kwargs) -> R:
             self.func = func
+            key = (args, tuple(sorted(kwargs.items())))
             now = time.time()
             try:
-                value, last_update = self.cache[args]
+                value, last_update = self.cache[key]
                 age = now - last_update
                 if self._call_count >= self.ctl or age > self.ttl:
                     self._call_count = 1
@@ -83,12 +90,12 @@ class cache:  # noqa: N801
                 self._call_count += 1
 
             except (KeyError, AttributeError):
-                value = self.func(*args)
-                self.cache[args] = (value, now)
+                value = func(*args, **kwargs)
+                self.cache[key] = (value, now)
                 return value
 
             except TypeError:
-                return self.func(*args)
+                return func(*args, **kwargs)
 
             else:
                 return value
@@ -125,7 +132,7 @@ class ThrottlingHttpAdapter(HTTPAdapter):
         self.hits = 0
         return False
 
-    def send(self, request, **kwargs):
+    def send(self, request, **kwargs):  # pyright: ignore[reportIncompatibleMethodOverride]
         if request.method == "HEAD" and self._is_too_many_requests():
             resp = requests.Response()
             resp.request = request
@@ -274,8 +281,8 @@ class SoundCloudClient:
                 logger.error(f"SoundCloud API request failed: {e}")  # noqa: TRY400
         return {}
 
-    def sanitize_tracks(self, tracks):
-        return [t for t in tracks if t]
+    def sanitize_tracks(self, tracks) -> tuple[Track]:
+        return tuple(t for t in tracks if t is not None)
 
     @cache()
     def parse_track(self, data, remote_url=False):  # noqa: C901, FBT002
